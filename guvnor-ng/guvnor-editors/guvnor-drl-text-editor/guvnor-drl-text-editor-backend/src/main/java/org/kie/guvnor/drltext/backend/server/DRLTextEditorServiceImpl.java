@@ -16,32 +16,33 @@
 
 package org.kie.guvnor.drltext.backend.server;
 
-import org.jboss.errai.bus.server.annotations.Service;
-import org.kie.commons.io.IOService;
-import org.kie.commons.java.nio.base.options.CommentedOption;
-import org.kie.guvnor.commons.data.events.AssetEditedEvent;
-import org.kie.guvnor.commons.data.events.AssetOpenedEvent;
-import org.kie.guvnor.commons.service.metadata.model.Metadata;
-import org.kie.guvnor.commons.service.validation.model.BuilderResult;
-import org.kie.guvnor.commons.service.verification.model.AnalysisReport;
-import org.kie.guvnor.datamodel.events.InvalidateDMOPackageCacheEvent;
-import org.kie.guvnor.drltext.service.DRLTextEditorService;
-import org.kie.guvnor.services.metadata.MetadataService;
-import org.uberfire.backend.server.util.Paths;
-import org.uberfire.backend.vfs.Path;
-import org.uberfire.backend.vfs.PathFactory;
-import org.uberfire.security.Identity;
-
+import java.util.Date;
 import javax.enterprise.context.ApplicationScoped;
 import javax.enterprise.event.Event;
 import javax.inject.Inject;
 import javax.inject.Named;
-import java.util.Date;
+
+import org.jboss.errai.bus.server.annotations.Service;
+import org.kie.commons.io.IOService;
+import org.kie.commons.java.nio.base.options.CommentedOption;
+import org.kie.guvnor.commons.service.validation.model.BuilderResult;
+import org.kie.guvnor.datamodel.events.InvalidateDMOProjectCacheEvent;
+import org.kie.guvnor.drltext.service.DRLTextEditorService;
+import org.kie.guvnor.services.file.CopyService;
+import org.kie.guvnor.services.file.DeleteService;
+import org.kie.guvnor.services.file.RenameService;
+import org.kie.guvnor.services.metadata.MetadataService;
+import org.kie.guvnor.services.metadata.model.Metadata;
+import org.uberfire.backend.server.util.Paths;
+import org.uberfire.backend.vfs.Path;
+import org.uberfire.client.workbench.widgets.events.ResourceAddedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceOpenedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceUpdatedEvent;
+import org.uberfire.security.Identity;
 
 @Service
 @ApplicationScoped
-public class DRLTextEditorServiceImpl
-        implements DRLTextEditorService {
+public class DRLTextEditorServiceImpl implements DRLTextEditorService {
 
     @Inject
     @Named("ioStrategy")
@@ -51,19 +52,124 @@ public class DRLTextEditorServiceImpl
     private MetadataService metadataService;
 
     @Inject
-    private Event<InvalidateDMOPackageCacheEvent> invalidateDMOPackageCache;
-    
+    private CopyService copyService;
+
     @Inject
-    private Event<AssetEditedEvent> assetEditedEvent;
-    
+    private DeleteService deleteService;
+
     @Inject
-    private Event<AssetOpenedEvent> assetOpenedEvent;
-    
+    private RenameService renameService;
+
+    @Inject
+    private Event<InvalidateDMOProjectCacheEvent> invalidateDMOProjectCache;
+
+    @Inject
+    private Event<ResourceOpenedEvent> resourceOpenedEvent;
+
+    @Inject
+    private Event<ResourceAddedEvent> resourceAddedEvent;
+
+    @Inject
+    private Event<ResourceUpdatedEvent> resourceUpdatedEvent;
+
     @Inject
     private Paths paths;
 
     @Inject
     private Identity identity;
+
+    @Override
+    public Path create( final Path context,
+                        final String fileName,
+                        final String content,
+                        final String comment ) {
+        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ),
+                                            false );
+
+        ioService.write( paths.convert( newPath ),
+                         content,
+                         makeCommentedOption( comment ) );
+
+        //Signal creation to interested parties
+        resourceAddedEvent.fire( new ResourceAddedEvent( newPath ) );
+
+        return newPath;
+    }
+
+    @Override
+    public String load( final Path path ) {
+        final String content = ioService.readAllString( paths.convert( path ) );
+
+        //Signal opening to interested parties
+        resourceOpenedEvent.fire( new ResourceOpenedEvent( path ) );
+
+        return content;
+    }
+
+    @Override
+    public Path save( final Path context,
+                      final String fileName,
+                      final String content,
+                      final String comment ) {
+        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ), false );
+
+        ioService.write( paths.convert( newPath ),
+                         content,
+                         makeCommentedOption( comment ) );
+
+        //Invalidate Project-level DMO cache in case user added a Declarative Type to their DRL. Tssk, Tssk.
+        invalidateDMOProjectCache.fire( new InvalidateDMOProjectCacheEvent( newPath ) );
+
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( newPath ) );
+
+        return newPath;
+    }
+
+    @Override
+    public Path save( final Path resource,
+                      final String content,
+                      final Metadata metadata,
+                      final String comment ) {
+        ioService.write( paths.convert( resource ),
+                         content,
+                         metadataService.setUpAttributes( resource,
+                                                          metadata ),
+                         makeCommentedOption( comment ) );
+
+        //Invalidate Project-level DMO cache in case user added a Declarative Type to their DRL. Tssk, Tssk.
+        invalidateDMOProjectCache.fire( new InvalidateDMOProjectCacheEvent( resource ) );
+
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( resource ) );
+
+        return resource;
+    }
+
+    @Override
+    public void delete( final Path path,
+                        final String comment ) {
+        deleteService.delete( path,
+                              comment );
+    }
+
+    @Override
+    public Path rename( final Path path,
+                        final String newName,
+                        final String comment ) {
+        return renameService.rename( path,
+                                     newName,
+                                     comment );
+    }
+
+    @Override
+    public Path copy( final Path path,
+                      final String newName,
+                      final String comment ) {
+        return copyService.copy( path,
+                                 newName,
+                                 comment );
+    }
 
     @Override
     public BuilderResult validate( final Path path,
@@ -76,104 +182,6 @@ public class DRLTextEditorServiceImpl
     public boolean isValid( final Path path,
                             final String content ) {
         return !validate( path, content ).hasLines();
-    }
-
-    @Override
-    public AnalysisReport verify( Path path,
-                                  String content ) {
-        //TODO {porcelli} verify
-        return new AnalysisReport();
-    }
-
-    @Override
-    public String load( Path path ) {
-        assetOpenedEvent.fire( new AssetOpenedEvent( path ) );  
-        return ioService.readAllString( paths.convert( path ) );
-    }
-
-    @Override
-    public void save( final Path path,
-                      final String content,
-                      final String comment ) {
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );   
-        ioService.write( paths.convert( path ),
-                         content,
-                         makeCommentedOption( comment ) );
-    }
-
-    @Override
-    public Path save( final Path context,
-                      final String fileName,
-                      final String content,
-                      final String comment ) {
-        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ), false );
-
-        save( newPath, content, comment );
-
-        return newPath;
-    }
-
-    @Override
-    public void save( final Path path,
-                      final String content ) {
-        ioService.write( paths.convert( path ),
-                         content );
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );   
-    }
-
-    @Override
-    public void save( final Path resource,
-                      final String content,
-                      final Metadata metadata,
-                      final String comment ) {
-
-        ioService.write(
-                paths.convert( resource ),
-                content,
-                metadataService.setUpAttributes( resource, metadata ),
-                makeCommentedOption( comment ) );
-
-        //Invalidate Package-level DMO cache in case user added a Declarative Type to their DRL. Tssk, Tssk.
-        invalidateDMOPackageCache.fire( new InvalidateDMOPackageCacheEvent( resource ) );
-        assetEditedEvent.fire( new AssetEditedEvent( resource ) );   
-    }
-
-    @Override
-    public void delete( final Path path,
-                        final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " DELETING asset [" + path.getFileName() + "]" );
-        ioService.delete( paths.convert( path ) );
-        
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );   
-    }
-
-    @Override
-    public Path rename( final Path path,
-                        final String newName,
-                        final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " RENAMING asset [" + path.getFileName() + "] to [" + newName + "]" );
-
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.move( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-        
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );   
-        return targetPath;
-    }
-
-    @Override
-    public Path copy( final Path path,
-                      final String newName,
-                      final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " COPYING asset [" + path.getFileName() + "] to [" + newName + "]" );
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.copy( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-        
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );   
-        return targetPath;
     }
 
     private CommentedOption makeCommentedOption( final String commitMessage ) {

@@ -30,81 +30,106 @@ import org.drools.guvnor.models.guided.scorecard.shared.ScoreCardModel;
 import org.jboss.errai.bus.server.annotations.Service;
 import org.kie.commons.io.IOService;
 import org.kie.commons.java.nio.base.options.CommentedOption;
-import org.kie.guvnor.commons.data.events.AssetEditedEvent;
-import org.kie.guvnor.commons.data.events.AssetOpenedEvent;
-import org.kie.guvnor.commons.service.metadata.model.Metadata;
 import org.kie.guvnor.commons.service.source.SourceServices;
 import org.kie.guvnor.commons.service.validation.model.BuilderResult;
 import org.kie.guvnor.commons.service.validation.model.BuilderResultLine;
-import org.kie.guvnor.commons.service.verification.model.AnalysisReport;
+import org.kie.guvnor.datamodel.events.InvalidateDMOProjectCacheEvent;
 import org.kie.guvnor.datamodel.oracle.DataModelOracle;
 import org.kie.guvnor.datamodel.service.DataModelService;
 import org.kie.guvnor.guided.scorecard.model.ScoreCardModelContent;
 import org.kie.guvnor.guided.scorecard.service.GuidedScoreCardEditorService;
+import org.kie.guvnor.services.file.CopyService;
+import org.kie.guvnor.services.file.DeleteService;
+import org.kie.guvnor.services.file.RenameService;
 import org.kie.guvnor.services.metadata.MetadataService;
+import org.kie.guvnor.services.metadata.model.Metadata;
 import org.uberfire.backend.server.util.Paths;
 import org.uberfire.backend.vfs.Path;
-import org.uberfire.backend.vfs.PathFactory;
+import org.uberfire.client.workbench.widgets.events.ResourceAddedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceOpenedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceUpdatedEvent;
 import org.uberfire.security.Identity;
 
 @Service
 @ApplicationScoped
-public class GuidedScoreCardEditorServiceImpl
-        implements GuidedScoreCardEditorService {
+public class GuidedScoreCardEditorServiceImpl implements GuidedScoreCardEditorService {
 
     @Inject
     @Named("ioStrategy")
     private IOService ioService;
 
     @Inject
-    private Paths paths;
-
-    @Inject
-    private DataModelService dataModelService;
-
-    @Inject
-    private SourceServices sourceServices;
-
-    @Inject
     private MetadataService metadataService;
+
+    @Inject
+    private CopyService copyService;
+
+    @Inject
+    private DeleteService deleteService;
+
+    @Inject
+    private RenameService renameService;
+
+    @Inject
+    private Event<InvalidateDMOProjectCacheEvent> invalidateDMOProjectCache;
+
+    @Inject
+    private Event<ResourceOpenedEvent> resourceOpenedEvent;
+
+    @Inject
+    private Event<ResourceAddedEvent> resourceAddedEvent;
+
+    @Inject
+    private Event<ResourceUpdatedEvent> resourceUpdatedEvent;
+
+    @Inject
+    private Paths paths;
 
     @Inject
     private Identity identity;
 
     @Inject
-    private Event<AssetEditedEvent> assetEditedEvent;
+    private SourceServices sourceServices;
 
     @Inject
-    private Event<AssetOpenedEvent> assetOpenedEvent;
+    private DataModelService dataModelService;
 
     private static final String RESOURCE_EXTENSION = "scgd";
 
     @Override
-    public ScoreCardModelContent loadContent( final Path path ) {
-        //De-serialize model
-        final ScoreCardModel model = loadModel( path );
+    public Path create( final Path context,
+                        final String fileName,
+                        final ScoreCardModel content,
+                        final String comment ) {
+        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ), false );
 
-        final DataModelOracle oracle = dataModelService.getDataModel( path );
-
-        assetOpenedEvent.fire( new AssetOpenedEvent( path ) );
-        return new ScoreCardModelContent( model,
-                                          oracle );
-    }
-
-    @Override
-    public ScoreCardModel loadModel( final Path path ) {
-        return GuidedScoreCardXMLPersistence.getInstance().unmarshall( ioService.readAllString( paths.convert( path ) ) );
-    }
-
-    @Override
-    public void save( final Path path,
-                      final ScoreCardModel model,
-                      final String comment ) {
-        ioService.write( paths.convert( path ),
-                         GuidedScoreCardXMLPersistence.getInstance().marshal( model ),
+        ioService.write( paths.convert( newPath ),
+                         toSource( newPath,
+                                   content ),
                          makeCommentedOption( comment ) );
 
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
+        //Signal creation to interested parties
+        resourceAddedEvent.fire( new ResourceAddedEvent( newPath ) );
+
+        return newPath;
+    }
+
+    @Override
+    public ScoreCardModel load( final Path path ) {
+        final String content = ioService.readAllString( paths.convert( path ) );
+
+        //Signal opening to interested parties
+        resourceOpenedEvent.fire( new ResourceOpenedEvent( path ) );
+
+        return GuidedScoreCardXMLPersistence.getInstance().unmarshall( content );
+    }
+
+    @Override
+    public ScoreCardModelContent loadContent( final Path path ) {
+        final ScoreCardModel model = load( path );
+        final DataModelOracle oracle = dataModelService.getDataModel( path );
+        return new ScoreCardModelContent( model,
+                                          oracle );
     }
 
     @Override
@@ -114,65 +139,59 @@ public class GuidedScoreCardEditorServiceImpl
                       final String comment ) {
         final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ), false );
 
-        save( newPath, model, comment );
+        ioService.write( paths.convert( newPath ),
+                         GuidedScoreCardXMLPersistence.getInstance().marshal( model ),
+                         makeCommentedOption( comment ) );
+
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( newPath ) );
 
         return newPath;
     }
 
     @Override
-    public void save( final Path resource,
+    public Path save( final Path resource,
                       final ScoreCardModel model,
                       final Metadata metadata,
                       final String comment ) {
-
         ioService.write( paths.convert( resource ),
                          GuidedScoreCardXMLPersistence.getInstance().marshal( model ),
                          metadataService.setUpAttributes( resource, metadata ),
                          makeCommentedOption( comment ) );
 
-        assetEditedEvent.fire( new AssetEditedEvent( resource ) );
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( resource ) );
+
+        return resource;
     }
 
     @Override
     public void delete( final Path path,
                         final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " DELETING asset [" + path.getFileName() + "]" );
-
-        ioService.delete( paths.convert( path ) );
-
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
+        deleteService.delete( path,
+                              comment );
     }
 
     @Override
     public Path rename( final Path path,
                         final String newName,
                         final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " RENAMING asset [" + path.getFileName() + "] to [" + newName + "]" );
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.move( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
-        return targetPath;
+        return renameService.rename( path,
+                                     newName,
+                                     comment );
     }
 
     @Override
     public Path copy( final Path path,
                       final String newName,
                       final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " COPYING asset [" + path.getFileName() + "] to [" + newName + "]" );
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.copy( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
-        return targetPath;
+        return copyService.copy( path,
+                                 newName,
+                                 comment );
     }
 
     @Override
-    public String toSource( Path path,
+    public String toSource( final Path path,
                             final ScoreCardModel model ) {
         final BuilderResult result = validateScoreCard( model );
         if ( !result.hasLines() ) {
@@ -195,21 +214,12 @@ public class GuidedScoreCardEditorServiceImpl
                           model ).hasLines();
     }
 
-    @Override
-    public AnalysisReport verify( final Path path,
-                                  final ScoreCardModel content ) {
-        //TODO {porcelli} verify
-        return new AnalysisReport();
-    }
-
-    public String toDRL( Path path,
-                         final ScoreCardModel model ) {
-
+    private String toDRL( Path path,
+                          final ScoreCardModel model ) {
         return sourceServices.getServiceFor( paths.convert( path ) ).getSource( paths.convert( path ), model );
     }
 
     private String toDRL( final BuilderResult result ) {
-
         final StringBuilder drl = new StringBuilder();
         for ( final BuilderResultLine msg : result.getLines() ) {
             drl.append( "//" ).append( msg.getMessage() ).append( "\n" );

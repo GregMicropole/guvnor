@@ -32,44 +32,75 @@ import org.drools.guvnor.models.commons.shared.rule.RuleModel;
 import org.jboss.errai.bus.server.annotations.Service;
 import org.kie.commons.io.IOService;
 import org.kie.commons.java.nio.base.options.CommentedOption;
-import org.kie.guvnor.commons.data.events.AssetEditedEvent;
-import org.kie.guvnor.commons.data.events.AssetOpenedEvent;
-import org.kie.guvnor.commons.data.workingset.WorkingSetConfigData;
-import org.kie.guvnor.commons.service.metadata.model.Metadata;
 import org.kie.guvnor.commons.service.source.SourceServices;
 import org.kie.guvnor.commons.service.validation.model.BuilderResult;
-import org.kie.guvnor.commons.service.verification.model.AnalysisReport;
+import org.kie.guvnor.datamodel.events.InvalidateDMOProjectCacheEvent;
 import org.kie.guvnor.datamodel.oracle.DataModelOracle;
 import org.kie.guvnor.datamodel.service.DataModelService;
-import org.kie.guvnor.datamodel.service.FileDiscoveryService;
 import org.kie.guvnor.guided.rule.model.GuidedEditorContent;
 import org.kie.guvnor.guided.rule.service.GuidedRuleEditorService;
 import org.kie.guvnor.project.service.ProjectService;
+import org.kie.guvnor.services.backend.file.FileExtensionFilter;
+import org.kie.guvnor.services.file.CopyService;
+import org.kie.guvnor.services.file.DeleteService;
+import org.kie.guvnor.services.file.FileDiscoveryService;
+import org.kie.guvnor.services.file.Filter;
+import org.kie.guvnor.services.file.RenameService;
 import org.kie.guvnor.services.metadata.MetadataService;
+import org.kie.guvnor.services.metadata.model.Metadata;
 import org.mvel2.MVEL;
 import org.mvel2.templates.TemplateRuntime;
 import org.uberfire.backend.server.util.Paths;
 import org.uberfire.backend.vfs.Path;
-import org.uberfire.backend.vfs.PathFactory;
+import org.uberfire.client.workbench.widgets.events.ResourceAddedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceOpenedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceUpdatedEvent;
 import org.uberfire.security.Identity;
 
 @Service
 @ApplicationScoped
-public class GuidedRuleEditorServiceImpl
-        implements GuidedRuleEditorService {
+public class GuidedRuleEditorServiceImpl implements GuidedRuleEditorService {
+
+    private static final Filter FILTER_DSLS = new FileExtensionFilter( ".dsl" );
+
+    private static final Filter FILTER_GLOBALS = new FileExtensionFilter( ".global.drl" );
 
     @Inject
     @Named("ioStrategy")
     private IOService ioService;
 
     @Inject
+    private MetadataService metadataService;
+
+    @Inject
+    private CopyService copyService;
+
+    @Inject
+    private DeleteService deleteService;
+
+    @Inject
+    private RenameService renameService;
+
+    @Inject
+    private Event<InvalidateDMOProjectCacheEvent> invalidateDMOProjectCache;
+
+    @Inject
+    private Event<ResourceOpenedEvent> resourceOpenedEvent;
+
+    @Inject
+    private Event<ResourceAddedEvent> resourceAddedEvent;
+
+    @Inject
+    private Event<ResourceUpdatedEvent> resourceUpdatedEvent;
+
+    @Inject
     private Paths paths;
 
     @Inject
-    private DataModelService dataModelService;
+    private Identity identity;
 
     @Inject
-    private MetadataService metadataService;
+    private DataModelService dataModelService;
 
     @Inject
     private FileDiscoveryService fileDiscoveryService;
@@ -78,44 +109,47 @@ public class GuidedRuleEditorServiceImpl
     private ProjectService projectService;
 
     @Inject
-    private Identity identity;
-
-    @Inject
     private SourceServices sourceServices;
 
-    @Inject
-    private Event<AssetEditedEvent> assetEditedEvent;
+    @Override
+    public Path create( final Path context,
+                        final String fileName,
+                        final RuleModel content,
+                        final String comment ) {
+        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ),
+                                            false );
 
-    @Inject
-    private Event<AssetOpenedEvent> assetOpenedEvent;
+        ioService.write( paths.convert( newPath ),
+                         toSource( newPath,
+                                   content ),
+                         makeCommentedOption( comment ) );
 
-    public GuidedRuleEditorServiceImpl() {
+        //Signal creation to interested parties
+        resourceAddedEvent.fire( new ResourceAddedEvent( newPath ) );
+
+        return newPath;
     }
 
     @Override
-    public GuidedEditorContent loadContent( final Path path ) {
-        //De-serialize model
-        final RuleModel model = loadRuleModel( path );
-
-        final DataModelOracle oracle = dataModelService.getDataModel( path );
-
-        assetOpenedEvent.fire( new AssetOpenedEvent( path ) );
-
-        return new GuidedEditorContent( oracle,
-                                        model );
-    }
-
-    @Override
-    public RuleModel loadRuleModel( Path path ) {
+    public RuleModel load( final Path path ) {
         final String drl = ioService.readAllString( paths.convert( path ) );
         final String[] dsls = loadDslsForPackage( path );
         final List<String> globals = loadGlobalsForPackage( path );
 
-        assetOpenedEvent.fire( new AssetOpenedEvent( path ) );
+        //Signal opening to interested parties
+        resourceOpenedEvent.fire( new ResourceOpenedEvent( path ) );
 
         return BRDRLPersistence.getInstance().unmarshalUsingDSL( drl,
                                                                  globals,
                                                                  dsls );
+    }
+
+    @Override
+    public GuidedEditorContent loadContent( final Path path ) {
+        final RuleModel model = load( path );
+        final DataModelOracle oracle = dataModelService.getDataModel( path );
+        return new GuidedEditorContent( oracle,
+                                        model );
     }
 
     private String[] loadDslsForPackage( final Path path ) {
@@ -123,7 +157,7 @@ public class GuidedRuleEditorServiceImpl
         final Path packagePath = projectService.resolvePackage( path );
         final org.kie.commons.java.nio.file.Path nioPackagePath = paths.convert( packagePath );
         final Collection<org.kie.commons.java.nio.file.Path> dslPaths = fileDiscoveryService.discoverFiles( nioPackagePath,
-                                                                                                            ".dsl" );
+                                                                                                            FILTER_DSLS );
         for ( final org.kie.commons.java.nio.file.Path dslPath : dslPaths ) {
             final String dslDefinition = ioService.readAllString( dslPath );
             dsls.add( dslDefinition );
@@ -137,7 +171,7 @@ public class GuidedRuleEditorServiceImpl
         final Path packagePath = projectService.resolvePackage( path );
         final org.kie.commons.java.nio.file.Path nioPackagePath = paths.convert( packagePath );
         final Collection<org.kie.commons.java.nio.file.Path> globalPaths = fileDiscoveryService.discoverFiles( nioPackagePath,
-                                                                                                               ".global.drl" );
+                                                                                                               FILTER_GLOBALS );
         for ( final org.kie.commons.java.nio.file.Path globalPath : globalPaths ) {
             final String globalDefinition = ioService.readAllString( globalPath );
             globals.add( globalDefinition );
@@ -147,95 +181,71 @@ public class GuidedRuleEditorServiceImpl
     }
 
     @Override
-    public void save( final Path path,
-                      final RuleModel model,
-                      final String comment ) {
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
-
-        ioService.write( paths.convert( path ),
-                         toSource( path,
-                                   model ),
-                         makeCommentedOption( comment ) );
-    }
-
-    @Override
     public Path save( final Path context,
                       final String fileName,
                       final RuleModel model,
                       final String comment ) {
-        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ), false );
+        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ),
+                                            false );
 
-        save( newPath, model, comment );
+        ioService.write( paths.convert( newPath ),
+                         toSource( newPath,
+                                   model ),
+                         makeCommentedOption( comment ) );
+
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( newPath ) );
 
         return newPath;
     }
 
     @Override
-    public void save( final Path path,
+    public Path save( final Path resource,
                       final RuleModel model,
                       final Metadata metadata,
                       final String comment ) {
-
-        ioService.write( paths.convert( path ),
-                         toSource( path,
+        ioService.write( paths.convert( resource ),
+                         toSource( resource,
                                    model ),
-                         metadataService.setUpAttributes( path,
+                         metadataService.setUpAttributes( resource,
                                                           metadata ),
                          makeCommentedOption( comment ) );
 
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( resource ) );
+
+        return resource;
     }
 
     @Override
     public void delete( final Path path,
                         final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " DELETING asset [" + path.getFileName() + "]" );
-
-        ioService.delete( paths.convert( path ) );
-
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
+        deleteService.delete( path,
+                              comment );
     }
 
     @Override
     public Path rename( final Path path,
                         final String newName,
                         final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " RENAMING asset [" + path.getFileName() + "] to [" + newName + "]" );
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.move( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
-        return targetPath;
+        return renameService.rename( path,
+                                     newName,
+                                     comment );
     }
 
     @Override
     public Path copy( final Path path,
                       final String newName,
                       final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " COPYING asset [" + path.getFileName() + "] to [" + newName + "]" );
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.copy( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-
-        assetEditedEvent.fire( new AssetEditedEvent( path ) );
-        return targetPath;
+        return copyService.copy( path,
+                                 newName,
+                                 comment );
     }
 
     @Override
     public String toSource( Path path,
                             final RuleModel model ) {
         return sourceServices.getServiceFor( paths.convert( path ) ).getSource( paths.convert( path ), model );
-    }
-
-    @Override
-    public AnalysisReport verify( final Path path,
-                                  final RuleModel content,
-                                  final Collection<WorkingSetConfigData> activeWorkingSets ) {
-        //TODO {porcelli} verify
-        return new AnalysisReport();
     }
 
     @Override
@@ -260,4 +270,5 @@ public class GuidedRuleEditorServiceImpl
                                                         when );
         return co;
     }
+
 }

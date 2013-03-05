@@ -68,6 +68,7 @@
       <outputFileNameMapping>guvnor-${artifact.version}${dashClassifier?}.${artifact.extension}</outputFileNameMapping>
       <useStrictFiltering>true</useStrictFiltering>
     </dependencySet>
+    
     <!--<dependencySet>-->
       <!--<includes>-->
         <!--<include>org.drools:knowledge-api:jar</include>-->

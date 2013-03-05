@@ -16,13 +16,17 @@
 
 package org.kie.guvnor.globals.backend.server;
 
+import java.util.Date;
+import javax.enterprise.context.ApplicationScoped;
+import javax.enterprise.event.Event;
+import javax.inject.Inject;
+import javax.inject.Named;
+
 import org.jboss.errai.bus.server.annotations.Service;
 import org.kie.commons.io.IOService;
 import org.kie.commons.java.nio.base.options.CommentedOption;
-import org.kie.guvnor.commons.service.metadata.model.Metadata;
 import org.kie.guvnor.commons.service.source.SourceServices;
 import org.kie.guvnor.commons.service.validation.model.BuilderResult;
-import org.kie.guvnor.commons.service.verification.model.AnalysisReport;
 import org.kie.guvnor.datamodel.events.InvalidateDMOPackageCacheEvent;
 import org.kie.guvnor.datamodel.oracle.DataModelOracle;
 import org.kie.guvnor.datamodel.service.DataModelService;
@@ -30,32 +34,49 @@ import org.kie.guvnor.globals.backend.server.util.GlobalsPersistence;
 import org.kie.guvnor.globals.model.GlobalsEditorContent;
 import org.kie.guvnor.globals.model.GlobalsModel;
 import org.kie.guvnor.globals.service.GlobalsEditorService;
+import org.kie.guvnor.services.file.CopyService;
+import org.kie.guvnor.services.file.DeleteService;
+import org.kie.guvnor.services.file.RenameService;
 import org.kie.guvnor.services.metadata.MetadataService;
+import org.kie.guvnor.services.metadata.model.Metadata;
 import org.uberfire.backend.server.util.Paths;
 import org.uberfire.backend.vfs.Path;
-import org.uberfire.backend.vfs.PathFactory;
+import org.uberfire.client.workbench.widgets.events.ResourceAddedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceOpenedEvent;
+import org.uberfire.client.workbench.widgets.events.ResourceUpdatedEvent;
 import org.uberfire.security.Identity;
-
-import javax.enterprise.context.ApplicationScoped;
-import javax.enterprise.event.Event;
-import javax.inject.Inject;
-import javax.inject.Named;
-import java.util.Date;
 
 @Service
 @ApplicationScoped
-public class GlobalsEditorServiceImpl
-        implements GlobalsEditorService {
+public class GlobalsEditorServiceImpl implements GlobalsEditorService {
 
     @Inject
     @Named("ioStrategy")
     private IOService ioService;
 
     @Inject
-    private DataModelService dataModelService;
+    private MetadataService metadataService;
 
     @Inject
-    private MetadataService metadataService;
+    private CopyService copyService;
+
+    @Inject
+    private DeleteService deleteService;
+
+    @Inject
+    private RenameService renameService;
+
+    @Inject
+    private Event<InvalidateDMOPackageCacheEvent> invalidatePackageDMOEvent;
+
+    @Inject
+    private Event<ResourceOpenedEvent> resourceOpenedEvent;
+
+    @Inject
+    private Event<ResourceAddedEvent> resourceAddedEvent;
+
+    @Inject
+    private Event<ResourceUpdatedEvent> resourceUpdatedEvent;
 
     @Inject
     private Paths paths;
@@ -64,37 +85,47 @@ public class GlobalsEditorServiceImpl
     private Identity identity;
 
     @Inject
-    private SourceServices sourceServices;
+    private DataModelService dataModelService;
 
     @Inject
-    private Event<InvalidateDMOPackageCacheEvent> invalidatePackageDMOEvent;
+    private SourceServices sourceServices;
 
     @Override
-    public GlobalsEditorContent loadContent( final Path path ) {
-        //De-serialize model
-        final GlobalsModel model = loadGlobalsModel( path );
+    public Path create( final Path context,
+                        final String fileName,
+                        final GlobalsModel content,
+                        final String comment ) {
+        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ),
+                                            false );
 
-        final DataModelOracle oracle = dataModelService.getDataModel( path );
+        ioService.write( paths.convert( newPath ),
+                         GlobalsPersistence.getInstance().marshal( content ),
+                         makeCommentedOption( comment ) );
 
-        return new GlobalsEditorContent( model,
-                                         oracle );
+        //Signal creation to interested parties
+        resourceAddedEvent.fire( new ResourceAddedEvent( newPath ) );
+
+        return newPath;
     }
 
-    private GlobalsModel loadGlobalsModel( final Path path ) {
+    @Override
+    public GlobalsModel load( final Path path ) {
         final String content = ioService.readAllString( paths.convert( path ) );
+
+        //Signal opening to interested parties
+        resourceOpenedEvent.fire( new ResourceOpenedEvent( path ) );
+
         return GlobalsPersistence.getInstance().unmarshal( content );
     }
 
     @Override
-    public void save( final Path path,
-                      final GlobalsModel model,
-                      final String comment ) {
-        ioService.write( paths.convert( path ),
-                         GlobalsPersistence.getInstance().marshal( model ),
-                         makeCommentedOption( comment ) );
+    public GlobalsEditorContent loadContent( final Path path ) {
+        //De-serialize model
+        final GlobalsModel model = load( path );
+        final DataModelOracle oracle = dataModelService.getDataModel( path );
 
-        //A change in Globals invalidates the Package-level DMO
-        invalidatePackageDMOEvent.fire( new InvalidateDMOPackageCacheEvent( path ) );
+        return new GlobalsEditorContent( model,
+                                         oracle );
     }
 
     @Override
@@ -102,57 +133,65 @@ public class GlobalsEditorServiceImpl
                       final String fileName,
                       final GlobalsModel content,
                       final String comment ) {
-        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ), false );
+        final Path newPath = paths.convert( paths.convert( context ).resolve( fileName ),
+                                            false );
 
-        save( newPath, content, comment );
+        ioService.write( paths.convert( newPath ),
+                         GlobalsPersistence.getInstance().marshal( content ),
+                         makeCommentedOption( comment ) );
+
+        //Invalidate Package-level DMO cache as Globals have changed.
+        invalidatePackageDMOEvent.fire( new InvalidateDMOPackageCacheEvent( newPath ) );
+
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( newPath ) );
 
         return newPath;
     }
 
     @Override
-    public void save( final Path path,
-                      final GlobalsModel model,
+    public Path save( final Path resource,
+                      final GlobalsModel content,
                       final Metadata metadata,
                       final String comment ) {
-        ioService.write( paths.convert( path ),
-                         GlobalsPersistence.getInstance().marshal( model ),
-                         metadataService.setUpAttributes( path,
+        ioService.write( paths.convert( resource ),
+                         GlobalsPersistence.getInstance().marshal( content ),
+                         metadataService.setUpAttributes( resource,
                                                           metadata ),
                          makeCommentedOption( comment ) );
 
-        //A change in Globals invalidates the Package-level DMO
-        invalidatePackageDMOEvent.fire( new InvalidateDMOPackageCacheEvent( path ) );
+        //Invalidate Package-level DMO cache as Globals have changed.
+        invalidatePackageDMOEvent.fire( new InvalidateDMOPackageCacheEvent( resource ) );
+
+        //Signal update to interested parties
+        resourceUpdatedEvent.fire( new ResourceUpdatedEvent( resource ) );
+
+        return resource;
     }
 
     @Override
     public void delete( final Path path,
                         final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " DELETING asset [" + path.getFileName() + "]" );
-        ioService.delete( paths.convert( path ) );
+        deleteService.delete( path,
+                              comment );
     }
 
     @Override
     public Path rename( final Path path,
                         final String newName,
                         final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " RENAMING asset [" + path.getFileName() + "] to [" + newName + "]" );
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.move( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-        return targetPath;
+        return renameService.rename( path,
+                                     newName,
+                                     comment );
     }
 
     @Override
     public Path copy( final Path path,
                       final String newName,
                       final String comment ) {
-        System.out.println( "USER:" + identity.getName() + " COPYING asset [" + path.getFileName() + "] to [" + newName + "]" );
-        String targetName = path.getFileName().substring( 0, path.getFileName().lastIndexOf( "/" ) + 1 ) + newName;
-        String targetURI = path.toURI().substring( 0, path.toURI().lastIndexOf( "/" ) + 1 ) + newName;
-        Path targetPath = PathFactory.newPath( path.getFileSystem(), targetName, targetURI );
-        ioService.copy( paths.convert( path ), paths.convert( targetPath ), new CommentedOption( identity.getName(), comment ) );
-        return targetPath;
+        return copyService.copy( path,
+                                 newName,
+                                 comment );
     }
 
     @Override
@@ -177,13 +216,6 @@ public class GlobalsEditorServiceImpl
                           model ).hasLines();
     }
 
-    @Override
-    public AnalysisReport verify( final Path path,
-                                  final GlobalsModel model ) {
-        //TODO {porcelli} verify
-        return new AnalysisReport();
-    }
-
     private CommentedOption makeCommentedOption( final String commitMessage ) {
         final String name = identity.getName();
         final Date when = new Date();
@@ -193,4 +225,5 @@ public class GlobalsEditorServiceImpl
                                                         when );
         return co;
     }
+
 }

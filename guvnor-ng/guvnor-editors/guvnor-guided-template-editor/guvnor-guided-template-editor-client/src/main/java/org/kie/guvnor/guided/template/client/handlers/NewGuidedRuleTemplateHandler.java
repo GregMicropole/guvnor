@@ -9,8 +9,8 @@ import org.drools.guvnor.models.guided.template.shared.TemplateModel;
 import org.jboss.errai.bus.client.api.RemoteCallback;
 import org.jboss.errai.ioc.client.api.Caller;
 import org.kie.guvnor.commons.ui.client.handlers.DefaultNewResourceHandler;
-import org.kie.guvnor.commons.ui.client.save.CommandWithCommitMessage;
-import org.kie.guvnor.commons.ui.client.save.SaveOperationService;
+import org.kie.guvnor.commons.ui.client.popups.file.CommandWithCommitMessage;
+import org.kie.guvnor.commons.ui.client.popups.file.SaveOperationService;
 import org.kie.guvnor.guided.template.client.resources.GuidedTemplateEditorResources;
 import org.kie.guvnor.guided.template.client.resources.i18n.Constants;
 import org.kie.guvnor.guided.template.client.type.GuidedRuleTemplateResourceType;
@@ -51,21 +51,24 @@ public class NewGuidedRuleTemplateHandler extends DefaultNewResourceHandler {
         final TemplateModel templateModel = new TemplateModel();
         templateModel.name = baseFileName;
 
-        new SaveOperationService().save( contextPath, new CommandWithCommitMessage() {
-            @Override
-            public void execute( final String comment ) {
-                service.call( new RemoteCallback<Path>() {
-                    @Override
-                    public void callback( final Path path ) {
-                        notifySuccess();
-                        notifyResourceAdded( path );
-                        final PlaceRequest place = new PathPlaceRequest( path,
-                                                                         "GuidedRuleTemplateEditor" );
-                        placeManager.goTo( place );
-                    }
-                } ).save( contextPath, buildFileName( resourceType, baseFileName ), templateModel, comment );
-            }
-        } );
+        new SaveOperationService().save( contextPath,
+                                         new CommandWithCommitMessage() {
+                                             @Override
+                                             public void execute( final String comment ) {
+                                                 service.call( new RemoteCallback<Path>() {
+                                                     @Override
+                                                     public void callback( final Path path ) {
+                                                         notifySuccess();
+                                                         final PlaceRequest place = new PathPlaceRequest( path );
+                                                         placeManager.goTo( place );
+                                                     }
+                                                 } ).create( contextPath,
+                                                             buildFileName( resourceType,
+                                                                            baseFileName ),
+                                                             templateModel,
+                                                             comment );
+                                             }
+                                         } );
     }
 
 }

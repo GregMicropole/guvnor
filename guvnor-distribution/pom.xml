@@ -59,7 +59,7 @@
       <type>war</type>
       <classifier>jboss-as7.0</classifier>
     </dependency>
-
+    
     <!-- Migration -->
     <!--
     <dependency>
