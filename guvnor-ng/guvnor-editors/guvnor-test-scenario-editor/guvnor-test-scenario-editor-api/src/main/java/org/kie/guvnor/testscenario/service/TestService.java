@@ -16,13 +16,15 @@
 
 package org.kie.guvnor.testscenario.service;
 
-import org.jboss.errai.bus.server.annotations.Remote;
+import org.drools.base.TypeResolver;
 import org.junit.runner.notification.RunListener;
-import org.uberfire.backend.vfs.Path;
+import org.kie.runtime.KieSession;
 
-@Remote
-public interface TestService {
+public interface TestService<T> {
     
-    void run( Path resource, RunListener listener );
+    void run( T target, 
+              KieSession ksession,
+              TypeResolver resolver, 
+              RunListener listener );
 
 }
